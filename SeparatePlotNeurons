@@ -1,0 +1,465 @@
+import numpy as np
+import numpy.ma as ma  # masking arrays with NaN values like log0
+import os, re, time
+# from scipy import signal
+import scipy.io as sio
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
+from scipy import interpolate
+from scipy.ndimage.filters import gaussian_filter1d
+# from scipy import signal
+import pandas as pd
+
+from scipy.signal import butter, lfilter  # , freqz
+
+matfolder = "/Users/nikitazabolotniy/Desktop/DataAnal_Python/MZ_GRP_Data/Mykyta_Soldierfly_2019-07-10_M_c2r2[]"
+datalen = 20000 * 16
+fs = 20000
+duration = 16
+anglist = [-1, 90, 180, 270, 0, 45, 135, 225, 315, -1]
+sigma = 3
+threshold = 2.75
+stim_threshold = 1.0
+t = np.arange(start=0, stop=duration, step=1.0 / fs, dtype=np.float64)
+n = np.arange(start=0, stop=datalen, step=1)
+
+
+def natural_sort(l):
+    # sorts a list according to numbers appearing in it, at the end of list fields
+    convert = lambda text: int(text) if text.isdigit() else text.lower()
+    alphanum_key = lambda key: [convert(c) for c in re.split('([0-9]+)', key)]
+    return sorted(l, key=alphanum_key)
+
+
+def butter_lowpass(cutoff, fs, order=5):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
+
+
+def butter_lowpass_filter(data, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order=order)
+    y = lfilter(b, a, data)
+    return y
+
+
+def hist_auto_threshold(log=1):
+    #start_time = time.time()
+    matfilelist = []
+    for (dirpath, dirnames, filenames) in os.walk(matfolder):
+        break
+    for fn in filenames:
+        if fn.endswith(".mat"):
+            matfilelist.append(fn)
+
+    matfilelist = natural_sort(matfilelist)
+
+    #plt.figure(num=None, figsize=(8, 6), dpi=150, facecolor='w', edgecolor='k')
+
+    data_quantity = len(matfilelist)  # 84
+    hist_heatmap = np.zeros((data_quantity, 500))  # resolution 500 for each of 84 recordings
+    thresholdlist = np.zeros((2, data_quantity))  # threshold for each of them, assumes there are 2 neurons
+
+    for i in range(data_quantity):  # [sn]:#range(1):; should be 84
+
+        matfile = os.path.join(matfolder, matfilelist[i])
+        stim, resp = load_raw(os.path.join(matfolder, matfile))
+        # datalen is the number of recorded points, duration - actual time
+        peak_index = np.zeros(datalen, dtype=np.uint)  # this is 1d array, shape (N,)
+        # this is discrete peak detection
+        for j in range(1, datalen - 1):
+            if (resp[j - 1] < resp[j] > resp[j + 1]) or (resp[j - 1] > resp[j] < resp[j + 1]):
+                peak_index[j] = 1
+        # pick out peaks and put them in hist, need 500+1 to include the last edge of the bin
+        hist, bin_edges = np.histogram(resp[peak_index == 1], bins=np.linspace(0, 5, num=500 + 1))
+
+        # hist_heatmap[i, :] = np.log(hist)  # log of hist, i.e. of number of occurrences of voltages
+        # this takes care of the division by 0 problem
+        with np.errstate(divide='ignore'):
+            hist_heatmap[i, :] = np.log(hist)
+        # masked = ma.log(hist)
+        # hist_heatmap[i, :] = masked.filled(0)
+
+
+        hist_sm = gaussian_filter1d(hist, sigma)
+
+        b = 250  # know that at 2.5 have mean of noise lvl, so sensible to go down from there
+        cell = 1
+        while (b < 500 - 1):
+            if cell == 1:
+                # detect threshold for the first cell
+                if (hist_sm[b - 1] > hist_sm[b] <= hist_sm[b + 1]) or hist_sm[b] == 0:
+                    thresholdlist[0, i] = b / 100.0  # the threshold for first neuron
+                    b += 1
+                    # now need to wait until the patterns repeats, but first need to go up the distribution
+                    # of spikes for the first neuron
+                    # while(hist_sm[b - 1] > hist_sm[b] <= hist_sm[b + 1]
+                    #     or hist_sm[b - 1] > hist_sm[b] <= hist_sm[b + 1]):
+                    while not (hist_sm[b - 1] > hist_sm[b] > hist_sm[b + 1]):
+                        # loops inside until a new downward slope is detected
+                        b += 1
+                    cell += 1
+
+            elif cell == 2:
+                # detect the threshold for the second cell
+                if (hist_sm[b - 1] > hist_sm[b] <= hist_sm[b + 1]) or hist_sm[b] == 0:
+                    thresholdlist[1, i] = b / 100.0  # the threshold for first neuron
+                    cell += 1
+            else:
+                # when cell > 2, means we've detected maximum number so exit
+                break
+            b += 1
+
+        # thresholdlist[i] = b / 100.0
+        print('[WAIT] hist processing:', i + 1, '/', str(data_quantity), ', find threshold:', b / 100.0, end='\r')
+
+    #print("--- %s seconds ---" % (time.time() - start_time))
+    print('\n', '\r[DONE] Got data:', np.shape(hist_heatmap))
+    # plt.pcolormesh(hist_heatmap, cmap='jet')
+    # plt.colorbar()
+    #
+    # plt.plot(thresholdlist[0, :] * 100, range(len(thresholdlist[0, :])), 'm-')
+    # plt.plot(thresholdlist[1, :] * 100, range(len(thresholdlist[1, :])), 'm-')
+    #
+    # # plt.colorbar()
+    # plt.xticks(np.linspace(0, 500, num=10 + 1), np.linspace(0, 5, num=10 + 1))
+    # plt.minorticks_on()
+    # plt.xlabel('Histogram of peak voltage (V)')
+    # plt.ylabel('Rec seq num')
+    # plt.title(matfolder.split('\\')[-1])
+
+    # if log == 1:
+    #     if not os.path.exists(os.path.join(matfolder, "result\\")):
+    #         os.makedirs(os.path.join(matfolder, "result\\"))
+    #     plt.savefig(os.path.join(matfolder, 'result\\hist.png'))
+    #
+    #     sio.savemat(os.path.join(matfolder, "result\\thresholdlist.mat"),
+    #                 {'sigma': sigma, 'thresholdlist': thresholdlist})  # <<< save threshold and sigma
+
+    #plt.show()
+    return thresholdlist
+
+
+def getAllRaster_threshold(thresholdlist, log=1):
+    matfilelist = []
+
+    for (dirpath, dirnames, filenames) in os.walk(matfolder):
+        for fn in filenames:
+            if fn.endswith(".mat"):
+                matfilelist.append(fn)
+    # sort the filenames in the list according to the numbering
+    matfilelist = natural_sort(matfilelist)
+
+    # raster_array = np.zeros((0, datalen))
+    # sync_array = np.zeros((0, datalen))
+    # 3d matrices for 2 neurons
+    raster_array = np.zeros((len(matfilelist), datalen, 2))
+    sync_array = np.zeros((len(matfilelist), datalen))
+
+    for neuron in range(2):
+        for recording in range(len(matfilelist)):
+            stim, resp = load_raw(os.path.join(matfolder, matfilelist[recording]))
+            #print(resp)
+            raster = raw2raster2(thresholdlist, resp, neuron, recording)
+            #print(raster)
+            # brackets must be present to treat raster & sync as matrices
+
+            # raster_array = np.append(raster_array, [raster], axis=0)
+            # sync_array = np.append(sync_array, [sync], axis=0)
+            raster_array[recording:recording + 1, :, neuron] = raster
+            if neuron == 0:
+                sync = stim2sync(stim)
+                sync_array[recording:recording + 1, :] = sync
+
+    # if log == 1:
+    #     if not os.path.exists(os.path.join(matfolder, "result\\")):
+    #         os.makedirs(os.path.join(matfolder, "result\\"))
+    #     print('\n', '\r[SAVE] Saving data...')
+    #     sio.savemat(os.path.join(matfolder, "result\\raster.mat"),
+    #                 {'raster_array': raster_array.astype(bool),
+    #                  'sync_array': sync_array.astype(bool)})
+    #     print('[DONE] Data saved!')
+    return raster_array, sync_array
+
+
+def getAllXYUV(raster_array, sync_array, log=1):
+    matfilelist = []
+    for (dirpath, dirnames, filenames) in os.walk(matfolder):
+        for fn in filenames:
+            if fn.endswith(".mat"):
+                matfilelist.append(fn)
+    # sort the filenames in the list according to the numbering
+    matfilelist = natural_sort(matfilelist)
+
+    # if not os.path.isfile(os.path.join(matfolder, "result\\raster.mat")):
+    #     print("[ERROR] need raster.mat ...")
+    #     return 0
+    # raster_array = sio.loadmat(os.path.join(matfolder, 'result\\raster.mat'))['raster_array']
+    # sync_array = sio.loadmat(os.path.join(matfolder, 'result\\raster.mat'))['sync_array']
+    # print(np.shape(raster_array),np.shape(sync_array))
+    # 3d matrix to account for 2 neurons
+    XYUV = np.zeros((len(matfilelist), 4, 2))
+
+    for neuron in range(2):
+        for i in range(len(matfilelist)):
+            x, y = getXY(matfilelist[i])
+            print(raster_array[i, :, neuron])
+            u, v = getUV(sync_array[i], raster_array[i, :, neuron])
+            print('-------------')
+            print('u=%f, v=%f' % (u, v))
+            # print('[WAIT] XYUV processing:', i + 1, '/', len(matfilelist), ', with value: ', x, y, round(u, 2),
+            #       round(v, 2), end='\r')
+            # XYUV = np.append(XYUV, [[x, y, u, v]], axis=0)  # adds a row
+            XYUV[i:i+1, :, neuron] = np.array([x, y, u, v])
+
+
+
+    # if not os.path.exists(os.path.join(matfolder, "\\result\\")):
+    #     os.makedirs(os.path.join(matfolder, "\\result\\"))
+    # if log == 1:
+    #     print('\n', '\r[SAVE] Saving data...')
+    #     sio.savemat(os.path.join(matfolder, "result\\XYUV.mat"),
+    #                 {'XYUV': XYUV})  # ,'XYUV_contra':XYUV_contra})
+    #     print('[DONE] Data saved !')
+    return XYUV
+
+
+def plotAllSync(sync_array, log=1):  # <<< for debug
+    # raster_array=sio.loadmat(os.path.join(matfolder,'result\\raster.mat'))['raster_array']
+    #sync_array = sio.loadmat(os.path.join(matfolder, 'result\\raster.mat'))['sync_array']
+    # print(np.shape(raster_array),np.shape(sync_array))
+
+    plt.figure(num=None, figsize=(8, 6), dpi=80, facecolor='w', edgecolor='k')
+
+    for i in range(84):
+        # raster=raster_array[i].astype(np.float64)
+        # raster[raster==0]=np.nan
+        # plt.plot(t,raster*0.33+i,'b|',lw=0.5)
+        plt.plot(t, sync_array[i] * 0.66 + i, 'g')
+        #plt.title(matfolder.split('\\')[-2])
+        plt.xlabel('Time (s)')
+        plt.ylabel('Sorted spikes')
+
+    # if log==1 :
+    # 	plt.savefig(os.path.join(matfolder , 'result\\raster.png'))
+    plt.show()
+
+
+def plotReceptiveField(XYUV, quiver_scale=1, interp=1, log=1):
+    X, Y = np.meshgrid(np.arange(-180, 181, 15), np.arange(-75, 76, 15))
+    U = np.zeros_like(X, dtype=np.float64)
+    V = np.zeros_like(Y, dtype=np.float64)
+
+    # if not os.path.isfile(os.path.join(matfolder, "result\\XYUV.mat")):
+    #     print("[ERROR] need XYUV.mat ...")
+    #     return 0
+    # XYUV = sio.loadmat(os.path.join(matfolder, "result\\XYUV.mat"))['XYUV']
+    for neuron in range(2):
+        XYUV1 = XYUV[:, :, neuron]
+        XYUV_full = XYUV1
+
+        # print(np.shape(XYUV))
+        # print(XYUV)
+        plt.figure(num=None, figsize=(16, 9), dpi=80, facecolor='w', edgecolor='k')
+        ax = plt.gca()
+
+        for i in range(len(XYUV[:, :, neuron])):
+            x, y, u, v = XYUV[i, :, neuron]
+            # print(x,y,u,v)
+            Y_index = np.where(X[0, :] == x)
+            X_index = np.where(Y[:, 0] == y)
+
+            U[X_index, Y_index] = u
+            V[X_index, Y_index] = v
+
+            if x == -180:
+                # print(XYUV[i])
+                XYUV_full = np.vstack((XYUV_full, [180, y, u, v]))  # copy values from -180 to 180 deg
+
+        # print(np.shape(XYUV_full))
+
+        # print(np.shape(U))
+        # print(U[:,23],U[:,24])
+        U[:, 24] = U[:, 0]  # copy values from -180 to 180 deg
+        V[:, 24] = V[:, 0]  # copy values from -180 to 180 deg
+        # print('len of XYUV is: ', len(XYUV))
+        # print(XYUV[:,0],XYUV[:,1],XYUV[:,2],XYUV[:,3])
+        if interp == 1:
+            #   fU = interpolate.interp2d(XYUV[:,0],XYUV[:,1],-XYUV[:,2],kind='linear')
+            #   fV = interpolate.interp2d(XYUV[:,0],XYUV[:,1],-XYUV[:,3],kind='linear')
+            #   iU = fU(np.arange(-180,181,15),np.arange(-75,76,15))
+            #   iV = fV(np.arange(-180,181,15),np.arange(-75,76,15))
+            iU = interpolate.griddata((XYUV_full[:, 0], XYUV_full[:, 1]), XYUV_full[:, 2], (X, Y), method='linear')
+            iV = interpolate.griddata((XYUV_full[:, 0], XYUV_full[:, 1]), XYUV_full[:, 3], (X, Y), method='linear')
+
+            plt.quiver(X, Y, -iU, -iV, scale=quiver_scale, units='xy', color='r', width=1, headwidth=2,
+                       headlength=4)  # compensate up-side-down mount of the fly
+            # Q = ax.quiver(X,Y,symlog(-iU),symlog(-iV),units='xy',color='r') # compensate up-side-down mount of the fly
+            print('[INFO] the max UV is:', np.max(iU), np.max(iV))
+            plt.title(matfolder.split('\\')[-1] + ' @scale=' + str(quiver_scale), fontsize=24)
+        else:
+            plt.title(matfolder.split('\\')[-1] + " (no interpolation) " + ' @scale=' + str(quiver_scale))
+
+        plt.quiver(X, Y, -U, -V, scale=quiver_scale, units='xy', color='k', width=1, headwidth=2,
+                   headlength=4)  # compensate up-side-down mount of the fly
+        # Q = ax.quiver(X,Y,symlog(-U),symlog(-V),units='xy',color='k') # compensate up-side-down mount of the fly
+
+        # plt.title(matfolder)
+        plt.xlabel("Azimuth (deg)", fontsize=24)
+        plt.ylabel("Elevation (deg)", fontsize=24)
+        # plt.xticks(np.arange(-180,181,15))
+        # plt.yticks(np.arange(-75,76,15))
+
+        Az_ticks = np.arange(-180, 181, 30)
+        ax.set_xticks(Az_ticks)
+        Az_minor_ticks = np.arange(-180, 181, 15)
+        ax.set_xticks(Az_minor_ticks, minor=1)
+
+        El_ticks = np.arange(-75, 76, 30)
+        ax.set_yticks(El_ticks)
+        El_minor_ticks = np.arange(-75, 76, 15)
+        ax.set_yticks(El_minor_ticks, minor=1)
+
+        plt.xticks(fontsize=24)
+        plt.yticks(fontsize=24)
+
+        # ax.grid(which='both')
+        # ax.grid(which='minor', alpha=15)
+        # ax.grid(which='major', alpha=30)
+
+        # if log == 1:
+        #     if interp == 1:
+        #         plt.savefig(os.path.join(matfolder, 'result\\map.png'))
+        #     else:
+        #         plt.savefig(os.path.join(matfolder, 'result\\map_raw.png'))
+
+    plt.show()
+
+
+def load_raw(matfile=''):
+    # print ('Plotting ' + matfile + ' ...')
+    matdata = sio.loadmat(matfile)
+    data = matdata.get('data')
+    #del matdata
+    data = np.transpose(data)
+    stim = data[1]  # values for the stimulus, this is the second row
+    resp = data[0]  # values for the measured response, this is the first row
+
+    datalen = np.size(resp)
+    duration = datalen / fs
+    global t
+    t = np.arange(start=0, stop=duration, step=1.0 / fs, dtype=np.float64)
+    global n
+    n = np.arange(start=0, stop=datalen, step=1)
+
+    return stim, resp
+
+
+def stim2sync(stim=[]):
+    sync_raw = stim > stim_threshold  # raw sync singal
+    cutoff = 25  # define filter cutoff frequency
+    sync_filter = butter_lowpass_filter(sync_raw, cutoff, fs, 6)  # filtered signal (butterworth filter)
+    sync_clamp = sync_filter > 0.9  # get square wave of filetered signal
+
+    raw_diff = np.diff(np.array(sync_raw).astype(int))  # differentiated signal of raw sync siganl
+    clamp_diff = np.diff(
+        np.array(sync_clamp).astype(int))  # differentiated signal of filtered square signal
+
+    sync = np.zeros((datalen))  # initiation of a zero sync signal
+    for i in range(datalen - 1):
+        # if raw_diff[i]>0:				# if raw sync is a rising edge
+        if raw_diff[i] > 0 and sync_clamp[i] == 0:  # if raw sync is a rising edge
+            raw_rise = i  # found rising edge, set rising flag to 1
+        if raw_diff[i] < 0:  # if raw sync is a falling edge
+            raw_fall = i  # found falling edge, set falling flag to 1
+        if clamp_diff[i] > 0:
+            filtered_rise = i
+            sync[raw_rise:filtered_rise] = 1
+        if clamp_diff[i] < 0:
+            filtered_fall = i
+            sync[raw_fall:filtered_fall] = 0
+            if sum(sync_raw[filtered_rise:filtered_fall]) > fs * 0.9:
+                sync[filtered_rise:raw_fall] = 1
+            else:
+                sync[raw_rise:raw_fall] = 0
+
+    return sync
+
+
+def raw2raster(raw):
+    # only interested in occurence, not length of spikes
+    # the spike is so fast the the point before it is almost surely below the threshold
+    raster = np.zeros(datalen, dtype=np.uint)
+    for i in range(1, datalen):
+        if (raw[i] >= threshold and raw[i - 1] <= threshold):
+            raster[i] = 1
+    return raster
+
+
+def raw2raster2(thresholdlist, raw, neuron, recording):
+    # this function detects multiple neurons from multiple thresholds
+    raster = np.zeros(datalen, dtype=np.uint)
+    for i in range(1, datalen):
+        if neuron == 0:
+            # this is to detect the first neuron, closer to the 2.5V
+            if ((thresholdlist[neuron, recording] < raw[i] < thresholdlist[neuron+1, recording]) and \
+                    (raw[i - 1] < thresholdlist[neuron, recording])):
+                raster[i] = 1
+        if neuron == 1:
+            # this is to detect the first neuron, closer to the 2.5V
+            if raw[i] >= thresholdlist[neuron, recording] and raw[i - 1] <= thresholdlist[neuron, recording]:
+                raster[i] = 1
+    return raster
+
+
+def getXY(filename):
+    x = filename[filename.find('[AZ') + 3:filename.find('][EL')]
+    y = filename[filename.find('[EL') + 3:filename.find('][SN')]
+    x = int(x)
+    y = int(y)
+    return x, y
+
+
+def getUV(sync, raster):
+    LMS = np.zeros(10)
+    LPD = anglist
+    # LMS_index=0
+    sec = int(1.5 * fs)  # off-on-off 0.25 1 0.25 seconds, so that number of samples in this time
+    # section number, each stimulus is 1 sec, 8 of them, 2 are still images, grey screen - first and last
+
+    for i in range(10):
+        # if sync[i]==1 and raster[i]==1:
+        LMS[i] = (np.sum(sync[sec * i:sec * (i + 1)] * raster[sec * i:sec * (i + 1)])) / (
+                np.sum(sync[sec * i:sec * (i + 1)]) / fs)
+    # if sync[i-1]==1 and sync[i]==0:
+    # 	LMS_index+=1
+    # print(LMS,LPD)
+    u = 0
+    v = 0
+    # only take into account the moving angles
+    for j in range(1, 9):
+        u += LMS[j] * np.cos(LPD[j] * np.pi / 180.0)
+        v += LMS[j] * np.sin(LPD[j] * np.pi / 180.0)
+    #   print(u,v)
+    # print('-----------')
+    # print(u,v)
+    # print(np.sqrt(u**2+v**2),np.arctan2(v,u)*180.0/np.pi)
+    return u / 2, v / 2
+
+
+def main():
+    thresholdlist = hist_auto_threshold()
+    raster_array, sync_array = getAllRaster_threshold(thresholdlist)# this works correctly
+    # print(sum(sum(raster_array[:, :, 0])))
+    # print(sum(sum(raster_array[:, :, 1])))
+    XYUV = getAllXYUV(raster_array, sync_array)
+    #plotAllSync(sync_array) this works correctly
+    plotReceptiveField(XYUV, quiver_scale=4)
+    # print(XYUV[:,:,0])
+    # print("------------------")
+    # print(XYUV[:,:,1])
+    # try testing on regular data, with 1 neuron
+
+
+main()
