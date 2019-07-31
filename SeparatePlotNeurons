@@ -12,7 +12,7 @@ import pandas as pd
 
 from scipy.signal import butter, lfilter  # , freqz
 
-matfolder = "/Users/nikitazabolotniy/Desktop/DataAnal_Python/MZ_GRP_Data/Mykyta_Soldierfly_2019-07-10_M_c2r2[]"
+matfolder = "dataRep"
 datalen = 20000 * 16
 fs = 20000
 duration = 16
